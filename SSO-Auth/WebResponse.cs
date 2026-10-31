@@ -424,17 +424,27 @@ const sleep = (milliseconds) => {
         var punycodeBaseUrl = protocol + punycodeDomain;
 
         return Base + @"
-async function link(request) {
-    const jfCredentialsString = localStorage.getItem(""jellyfin_credentials"");
+// Read the signed-in user before main() clears jellyfin_credentials (the
+// Safari cache workaround). Reading it inside link() always found it empty,
+// so linking silently fell through to a normal SSO login.
+function readLinkingCredentials() {
+    try {
+        const jfCredentials = JSON.parse(localStorage.getItem(""jellyfin_credentials""));
+        const server = jfCredentials['Servers'][0];
+        return { jfUser: server['UserId'], jfToken: server['AccessToken'] };
+    } catch (e) {
+        return null;
+    }
+}
 
-    if (jfCredentialsString == null) return;
+// Resolves to an error message, or null when the link was created.
+async function link(request, linkingCredentials) {
+    if (linkingCredentials == null) return 'You are not signed in to Jellyfin.';
 
-    const jfCredentials = JSON.parse(jfCredentialsString);
-    const jfUser = jfCredentials['Servers'][0]['UserId'];
-    const jfToken = jfCredentials['Servers'][0]['AccessToken'];
+    const jfUser = linkingCredentials.jfUser;
+    const jfToken = linkingCredentials.jfToken;
 
-    if (jfUser == null) return;
-    if (jfToken == null) return;
+    if (jfUser == null || jfToken == null) return 'You are not signed in to Jellyfin.';
 
     const url = '" + $"{punycodeBaseUrl}/sso/{mode}/Link/{provider}/" + @"' + jfUser;
 
@@ -449,17 +459,18 @@ async function link(request) {
             `MediaBrowser Client=""${request.appName}"",Device=""${request.deviceName}"",DeviceId=""${request.deviceId}"",Version=""${request.appVersion}"",Token=""${jfToken}""`)
 
        xhr.onload = function(e) {
-         resolve(xhr.response);
+         resolve(xhr.status >= 200 && xhr.status < 300 ? null : `HTTP ${xhr.status}: ${xhr.responseText}`);
        };
        xhr.onerror = function (e) {
          console.log(e);
-         resolve(undefined);
+         resolve('Network error.');
        };
        xhr.send(JSON.stringify(request));
     })
 }
 
 async function main() {
+    const linkingCredentials = " + $"{isLinking}".ToLower() + @" ? readLinkingCredentials() : null;
     localStorage.removeItem('jellyfin_credentials');
     document.getElementById('iframe-main').src = '" + punycodeBaseUrl + @"/web/index.html';
 
@@ -477,7 +488,16 @@ async function main() {
 
     var request = {deviceId, appName, appVersion, deviceName, data};
 
-    if (" + $"{isLinking}".ToLower() + @") await link(request);
+    if (" + $"{isLinking}".ToLower() + @") {
+        // Stop instead of falling through to a normal SSO login, which would
+        // sign in as whatever account the provider identity already maps to.
+        const linkError = await link(request, linkingCredentials);
+        if (linkError != null) {
+            console.log(linkError);
+            document.body.innerText = 'Linking failed: ' + linkError;
+            return;
+        }
+    }
 
     var url = '" + punycodeBaseUrl + "/sso/" + mode + "/Auth/" + provider + @"';
 
